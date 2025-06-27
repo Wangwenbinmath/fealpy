@@ -91,7 +91,7 @@ class VariantHandler(Generic[_T, _P, _R_co]):
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs):
         key = self.vm.get_key(self.instance)
         func = self.vm[key]
-        return func.__get__(self.instance, self.owner)(*args, **kwargs)
+        return func.__get__(self.instance, self.owner)(*args)
 
     def __getitem__(self, val: Any) -> Callable[_P, _R_co]:
         func = self.vm[val]

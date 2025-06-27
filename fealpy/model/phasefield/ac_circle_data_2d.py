@@ -36,14 +36,7 @@ class AcCircleData2D:
 
     def velocity_field(self, p: TensorLike,t = 0.0) -> TensorLike:
         """Return the velocity field u."""
-        x = p[..., 0]
-        y = p[..., 1]
-        v = bm.zeros_like(p)
-        R = bm.sqrt(x**2 + y**2) + 1e-12  # Avoid division by zero
-        normal_x = x / (R + 1e-12)
-        normal_y = y / (R + 1e-12)
-        v = bm.stack((normal_x, normal_y), axis=-1)/(- R[:, None])
-        return v
+        return bm.zeros_like(p, dtype=bm.float64)
 
     @cartesian
     def init_solution(self, p: TensorLike,t = 0.0) -> TensorLike:

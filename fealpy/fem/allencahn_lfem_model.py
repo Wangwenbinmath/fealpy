@@ -8,12 +8,13 @@ from ..decorator import variantmethod,barycentric
 # FEM imports
 from ..functionspace import LagrangeFESpace
 from ..fem import BilinearForm, LinearForm
-from ..fem import DirichletBC
 from ..fem import (ScalarDiffusionIntegrator,
                    ScalarConvectionIntegrator,
                    ScalarMassIntegrator,
                    ScalarSourceIntegrator)
 from ..solver import spsolve,cg
+from ..sparse import COOTensor
+from ..sparse.ops import bmat
 
 class AllenCahnLFEMModel(ComputationalModel):
     """
@@ -50,10 +51,16 @@ class AllenCahnLFEMModel(ComputationalModel):
         if meshtype == 'tri':
             from ..mesh import TriangleMesh
             domain = self.pde.domain()
+            vertices = [[domain[0], domain[2]],
+                       [domain[1], domain[2]],
+                       [domain[1], domain[3]],
+                       [domain[0], domain[3]]]
+            # self.mesh = TriangleMesh.from_polygon_gmsh(vertices= vertices , h = 0.03)
             self.mesh = TriangleMesh.from_box(domain,nx,ny, **kwargs)
         elif meshtype == 'quad':
             from ..mesh import QuadrangleMesh
-            self.mesh = QuadrangleMesh.from_box(self.pde.domain(),nx,ny, **kwargs)
+            domain = self.pde.domain()
+            self.mesh = QuadrangleMesh.from_box(domain,nx,ny, **kwargs)
         kwargs = bm.context(self.mesh.node)
         vertices = bm.array([[domain[0], domain[2]],
                              [domain[1], domain[2]],
@@ -328,7 +335,7 @@ class AllenCahnLFEMModel(ComputationalModel):
         else:
             phi_force = space.function()
 
-        self.SCI.coef = dt*(uh0(bcs))
+        self.SCI.coef = dt*(uh0(bcs) - mesh_vector(bcs))
         
         @barycentric
         def source(bcs, index):
@@ -376,7 +383,7 @@ class AllenCahnLFEMModel(ComputationalModel):
             grad_phi0 = phi0.grad_value(bcs)
             cell_grad = bm.mean(grad_phi0, axis=1)
             vertex_grad = bm.zeros((NN, GD))
-            vertex_count = bm.zeros(NN)
+            vertex_count = bm.zeros(NN,dtype= bm.float64)
             cell2dof = space.cell_to_dof()
             vertex_grad = bm.index_add(vertex_grad, cell2dof, cell_grad[:, None])
             vertex_count = bm.index_add(vertex_count, cell2dof, 1)
@@ -399,17 +406,41 @@ class AllenCahnLFEMModel(ComputationalModel):
         value = alpha*(bm.linalg.det(J)-1)*phi0(bcs) - G(bcs)
         self.theta = 1/(gamma*area)*bm.einsum('cq ,q ,c ->',value , ws,cm)
 
+    @lagrange_multi_solver.register('implicit')
+    def lagrange_multi_solver(self, A,b):
+        """
+        Solve the Lagrange multiplier for the Allen-Cahn equation.
+        
+        This method computes the Lagrange multiplier using the explicit method.
+        
+        Parameters:
+            t1 (float): The current time in the simulation.
+            phi0 (Function, optional): Previous condition for the phase field variable.
+            uh0 (Function, optional): Previous solution for the vector field variable.
+            mesh_vector (Function, optional): Mesh vector for the previous time.
+        """
+        LagLinearForm = LinearForm(self.space)
+        LagLinearForm.add_integrator(ScalarSourceIntegrator(source=1, q=self.q))
+        LagA = LagLinearForm.assembly()
+        A0 = bm.ones(self.space.number_of_global_dofs())
+        A0 = COOTensor(bm.array([bm.arange(len(A0), dtype=bm.int32), 
+                                 bm.zeros(len(A0), dtype=bm.int32)]), A0, spshape=(len(A0), 1))
+        A1 = COOTensor(bm.array([bm.zeros(len(LagA), dtype=bm.int32),
+                                 bm.arange(len(LagA), dtype=bm.int32)]), LagA, spshape=(1, len(LagA)))
+        A = bmat([[A, A0], [A1, None]])
+        b0 = bm.array([self.mesh.integral(self.pde.init_solution)])
+        b  = bm.concat([b, b0], axis=0)
+
+        return A ,b
+
     @variantmethod("direct")
-    def solve(self):
+    def solve(self,A,b):
         """
         Solve the weak formulation of the Allen-Cahn equation.
         
         This method assembles the system matrix and right-hand side vector, applies boundary conditions,
         and solves the linear system using a direct solver.
         """  
-        A = self.bform.assembly()
-        b = self.lform.assembly()
-
         phi_new = spsolve(A, b,solver= 'scipy')
         return phi_new
     
@@ -447,12 +478,14 @@ class AllenCahnLFEMModel(ComputationalModel):
         This method updates the phase field variable using the Lagrange multiplier method,
         solves the linear system with the mesh fixed.
         """
-        self.lagrange_multi_solver(t1=self.t, phi0=self.phi0)
+        # self.lagrange_multi_solver(t1=self.t, phi0=self.phi0)
         self.uh0[:] = self.uspace.interpolate(lambda p: self.pde.velocity_field(p, t=self.t))
-        print(bm.max(self.uh0))
         self.update_coef(self.t,phi0=self.phi0, uh0=self.uh0)
-        phi_new = self.solve()
-        
+        A = self.bform.assembly()
+        b = self.lform.assembly()
+        # A,b = self.lagrange_multi_solver(A,b)
+        phi_new = self.solve(A,b)
+        # phi_new = phi_new[:-1]
         self.phi[:] = phi_new
         self.phi0[:] = self.phi[:]
 
@@ -471,14 +504,18 @@ class AllenCahnLFEMModel(ComputationalModel):
             self.node0 = self.mesh.node.copy()
             self.phi0[:] = self.space.interpolate(lambda p:self.pde.init_solution(p, t=self.t-self.dt))
 
-        mesh_vector = mspace.function(((self.mesh.node - self.node0)/self.dt).T.flatten())
+        # mesh_vector = mspace.function(((self.mesh.node - self.node0)/self.dt).T.flatten())
         self.uh0[:] = self.uspace.interpolate(lambda p: self.pde.velocity_field(p, t=self.dt))
-        self.lagrange_multi_solver(t1=self.t, phi0=self.phi0, uh0=self.uh0,mesh_vector=mesh_vector)
-        self.update_coef(t1=self.t, uh0=self.uh0, phi0=self.phi0)
-        phi_new = self.solve()
+        # self.lagrange_multi_solver(t1=self.t, phi0=self.phi0, uh0=self.uh0,mesh_vector=mesh_vector)
+        self.update_coef(t1=self.t, uh0=self.uh0, phi0=self.phi0, mesh_vector=None)
+        A = self.bform.assembly()
+        b = self.lform.assembly()
+        # A, b = self.lagrange_multi_solver(A, b)
+        phi_new = self.solve(A, b)
         self.phi[:] = phi_new
         self.phi0[:] = self.phi[:]
         self.node0 = self.mesh.node.copy()
+        mm.instance.uh = self.phi0.copy()
 
     def fphi(self, phi):
         """
@@ -525,13 +562,9 @@ class AllenCahnLFEMModel(ComputationalModel):
             # phi_error = self.mesh.error(self.phi, phi_exact, power=2)
             self.logger.info(f"Time: {self.t:.4f}")
             self.mesh.nodedata['interface'] = self.phi
-            fname = './' + 'test3_ac'+ str(i).zfill(10) + '.vtu'
+            self.mesh.nodedata['velocity'] = self.uh0.reshape(2,-1).T  
+            fname = './' + 'test2_ac'+ str(i).zfill(10) + '.vtu'
             self.mesh.to_vtk(fname=fname)
             if i > 10000:
                 self.logger.info(f"Stopping after {i} iterations.")
                 break
-            # if self.t > 100:
-            #     fig = plt.figure(figsize=(8, 8))
-            #     ax = fig.add_subplot(111, projection='3d')
-            #     linear_surfploter(ax, self.mesh, self.phi, scat_node=False)
-            #     plt.show()

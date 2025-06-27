@@ -441,16 +441,18 @@ class GFMMPDE(MM_monitor,MM_Interpolater):
             node = self.func_solver()
             v = node - self.node
             node = self._get_physical_node(v)
+
             
+
             error = bm.max(bm.linalg.norm(node - self.node,axis=1))
             print(f"iteration {i} , error: {error}")
-            
-            if i>=2 and error < self.tol:
-                break
-
             self.linear_interpolate(node)
             old_M = self.M.copy()
             self.construct(node)
+            if  error < self.tol:
+                break
+
+            
             
     def preprocessor(self,fun_solver =None):
         """

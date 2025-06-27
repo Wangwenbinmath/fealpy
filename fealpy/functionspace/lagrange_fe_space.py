@@ -129,7 +129,7 @@ class LagrangeFESpace(FunctionSpace, Generic[_MT]):
             assert len(gd) == self.number_of_global_dofs()
             if uh is None:
                 uh = bm.zeros_like(gd)
-            uh = bm.set_at(uh, (..., isDDof), gd[isDDof])
+            uh = bm.set_at(uh, (isDDof), gd[isDDof])
         elif callable(gd):
             gd = gd(ipoints[isDDof])
             if uh is None:
